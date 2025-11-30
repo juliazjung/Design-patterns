@@ -27,10 +27,8 @@ public class No extends UnicastRemoteObject implements NoInterface {
     private final Map<String, Integer> ultimaSequencia; // Controla a última sequência recebida de cada nó
     private final Map<String, ConcurrentSkipListMap<Integer, Mensagem>> mensagensForaDeOrdem;
 
-    // Variáveis para controle de falhas
-    private boolean simularFalhaOmissao = false;
-    private boolean simularFalhaTemporizacao = false;
-    private Random rand = new Random();
+    // Variáveis para controle de falhas - Atualizado
+    private EstrategiaFalha estrategiaFalha;
 
     private static long ACK_TIMEOUT_MS = 3000; // 3 segundos
     private static final int MAX_RETRIES = 3;
@@ -49,6 +47,8 @@ public class No extends UnicastRemoteObject implements NoInterface {
         this.ativo = true;
         this.log = new RegistradorLog(idNo);
         this.registry = LocateRegistry.getRegistry();
+
+        this.estrategiaFalha = new SemFalha();
 
         executor.submit(this::processarMensagens);
         executor.submit(this::enviarHeartbeats);
@@ -79,21 +79,16 @@ public class No extends UnicastRemoteObject implements NoInterface {
         if (!ativo)
             throw new RemoteException("Nó inativo");
 
-        //Falha de omissão - 30% chance de ocorrer
-        if (simularFalhaOmissao && rand.nextDouble() < 0.3) {
-            log.registrar("OMISSÃO SIMULADA: " + msg.getUniqueId());
-            return;
-        }
-
-        //Falha por temporização
-        if (simularFalhaTemporizacao) {
-            try {
-                int delayMillis = 1000 + rand.nextInt(4000); // Atraso de 1 a 5 segundos
-                log.registrar("FALHA SIMULADA (TEMPORIZAÇÃO): Atrasando mensagem em " + delayMillis + "ms");
-                Thread.sleep(delayMillis);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        // Aplicação da estratégia
+        try {
+            boolean deveProcessar = estrategiaFalha.processar(msg, log);
+            if (!deveProcessar) {
+                return; // Estratégia decidiu descartar a mensagem
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.registrar("Processamento interrompido durante aplicação de estratégia de falha");
+            return;
         }
 
         log.registrar("Recebida mensagem de " + msg.getSenderId() +
@@ -321,15 +316,30 @@ public class No extends UnicastRemoteObject implements NoInterface {
         }
     }
 
+    // Métodos simplificados
     public void setSimularFalhaOmissao(boolean ativar) throws RemoteException {
-        this.simularFalhaOmissao = ativar;
-        if (ativar) this.simularFalhaTemporizacao = false;
-        log.registrar("Modo falha por omissão: " + (ativar ? "ATIVADO" : "desativado"));
+        if (ativar) {
+            this.estrategiaFalha = new FalhaOmissao();
+            log.registrar("Modo falha por omissão: ATIVADO");
+        } else {
+            this.estrategiaFalha = new SemFalha();
+            log.registrar("Modo falha por omissão: desativado");
+        }
     }
 
     public void setSimularFalhaTemporizacao(boolean ativar) throws RemoteException {
-        this.simularFalhaTemporizacao = ativar;
-        if (ativar) this.simularFalhaOmissao = false;
-        log.registrar("Modo falha por temporização: " + (ativar ? "ATIVADO" : "desativado"));
+        if (ativar) {
+            this.estrategiaFalha = new FalhaTemporizacao();
+            log.registrar("Modo falha por temporização: ATIVADO");
+        } else {
+            this.estrategiaFalha = new SemFalha();
+            log.registrar("Modo falha por temporização: desativado");
+        }
+    }
+
+    // NOVO: Método para configurar estratégia customizada
+    public void setEstrategiaFalha(EstrategiaFalha estrategia) throws RemoteException {
+        this.estrategiaFalha = estrategia;
+        log.registrar("Estratégia de falha alterada para: " + estrategia.getNome());
     }
 }
