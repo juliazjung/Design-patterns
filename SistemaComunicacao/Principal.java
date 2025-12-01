@@ -103,6 +103,28 @@ public class Principal {
                     metricas.imprimirRelatorio();
                 }
 
+                // NOVO: Comando para ver estado atual
+                else if (comando.equalsIgnoreCase("estado")) {
+                    System.out.println("Estado atual: " + no.getEstado().getNomeEstado());
+                }
+                
+                // NOVO: Comando para ativar nó
+                else if (comando.equalsIgnoreCase("ativar")) {
+                    no.ativar();
+                }
+                
+                // NOVO: Comando para recuperar de falha
+                else if (comando.equalsIgnoreCase("recuperar")) {
+                    no.recuperar();
+                }
+                
+                // NOVO: Comando para simular falha
+                else if (comando.startsWith("falhar ")) {
+                    String motivo = comando.substring(7).trim();
+                    no.entrarEmFalha(motivo);
+                    System.out.println("Nó entrou em estado de falha: " + motivo);
+                }
+
                 } else {
                     System.out.println("Comando inválido");
                 }

@@ -10,4 +10,7 @@ public interface NoInterface extends Remote {
     void broadcast(String conteudo) throws RemoteException;
     void setSimularFalhaOmissao(boolean ativar) throws RemoteException;
     void setSimularFalhaTemporizacao(boolean ativar) throws RemoteException;
+    void ativar() throws RemoteException;
+    void recuperar() throws RemoteException;
+    void entrarEmFalha(String motivo) throws RemoteException;
 }

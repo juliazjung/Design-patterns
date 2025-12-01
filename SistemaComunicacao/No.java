@@ -9,6 +9,7 @@ public class No extends UnicastRemoteObject implements NoInterface {
     private String idNo;
     private List<NoInterface> vizinhos;
     private AtomicInteger contadorSequencia;
+    private EstadoNo estado;
 
     // Controle de mensagens
     private Map<String, Set<String>> mensagensEntregues;
@@ -17,7 +18,6 @@ public class No extends UnicastRemoteObject implements NoInterface {
 
     // Infraestrutura
     private ScheduledExecutorService executor;
-    private boolean ativo;
 
     // Para Atomic Broadcast (FIFO)
     private final Map<String, Integer> ultimaSequencia; // Controla a última sequência recebida de cada nó
@@ -36,14 +36,16 @@ public class No extends UnicastRemoteObject implements NoInterface {
         this.idNo = idNo;
         this.vizinhos = new CopyOnWriteArrayList<>();
         this.contadorSequencia = new AtomicInteger(0);
+        this.estado = new EstadoAtivo();
+
         this.mensagensEntregues = new ConcurrentHashMap<>();
         this.mensagensPendentes = new ConcurrentHashMap<>();
         this.ultimaSequencia = new ConcurrentHashMap<>();
         this.mensagensForaDeOrdem = new ConcurrentHashMap<>();
         this.filaMensagens = new PriorityBlockingQueue<>(11,
                 Comparator.comparingLong(Mensagem::getTimestamp));
+
         this.executor = Executors.newScheduledThreadPool(3);
-        this.ativo = true;
 
         this.estrategiaFalha = new SemFalha();
 
@@ -53,44 +55,57 @@ public class No extends UnicastRemoteObject implements NoInterface {
         executor.submit(this::processarMensagens);
         executor.submit(this::enviarHeartbeats);
 
-        GerenciadorLog.getInstancia().registrar(idNo, "Nó iniciado. Aguardando conexões...");
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Nó iniciado no estado: " + estado.getNomeEstado());
     }
 
     public void broadcast(String conteudo) {
         try {
-            // Usa a factory para criar mensagem
             Mensagem msg = MensagemFactory.criarMensagem(
                 idNo, 
                 contadorSequencia.incrementAndGet(), 
                 conteudo
             );
             
-            GerenciadorLog.getInstancia().registrar(idNo, "Broadcasting mensagem: " + msg);
-            mensagensPendentes.put(msg.getUniqueId(), msg);
-            executor.schedule(() -> verificarACK(msg, 0), ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-
-            for (NoInterface vizinho : vizinhos) {
-                try {
-                    vizinho.receive(msg);
-                } catch (RemoteException e) {
-                    GerenciadorLog.getInstancia().registrar(idNo, 
-                        "Falha ao enviar para vizinho: " + e.getMessage());
-                    tratarFalhaVizinho(vizinho);
-                }
-            }
-        } catch (IllegalArgumentException e) {
-            // Trata erros de validação
+            // Delega ao estado
+            estado.enviarMensagem(msg, this);
+            
+        } catch (Exception e) {
             GerenciadorLog.getInstancia().registrar(idNo, 
-                "Erro ao criar mensagem: " + e.getMessage());
-            throw new RuntimeException("Não foi possível criar mensagem", e);
+                "Erro ao broadcast: " + e.getMessage());
+        }
+    }
+
+    /**
+     * NOVO: Método auxiliar chamado pelo estado
+     */
+    public void processarEnvioMensagem(Mensagem msg) throws RemoteException {
+        GerenciadorLog.getInstancia().registrar(idNo, "Broadcasting mensagem: " + msg);
+        mensagensPendentes.put(msg.getUniqueId(), msg);
+        executor.schedule(() -> verificarACK(msg, 0), ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+
+        for (NoInterface vizinho : vizinhos) {
+            try {
+                vizinho.receive(msg);
+            } catch (RemoteException e) {
+                GerenciadorLog.getInstancia().registrar(idNo, 
+                    "Falha ao enviar para vizinho: " + e.getMessage());
+                tratarFalhaVizinho(vizinho);
+            }
         }
     }
 
     @Override
     public synchronized void receive(Mensagem msg) throws RemoteException {
-        if (!ativo)
-            throw new RemoteException("Nó inativo");
+        // Delega ao estado atual
+        estado.receberMensagem(msg, this);
+    }
 
+    /**
+     * NOVO: Método auxiliar chamado pelo estado
+     * Contém a lógica real de processamento
+     */
+    public void processarMensagemRecebida(Mensagem msg) throws RemoteException {
         // Aplicação da estratégia
         try {
             boolean deveProcessar = estrategiaFalha.processar(msg, new RegistradorLog(idNo));
@@ -100,24 +115,22 @@ public class No extends UnicastRemoteObject implements NoInterface {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             GerenciadorLog.getInstancia().registrar(idNo, 
-                "Processamento interrompido durante aplicação de estratégia de falha");
+                "Processamento interrompido");
             return;
         }
 
-        // Notifica observadores ao invés de logar diretamente
         gerenciadorEventos.notificarMensagemRecebida(idNo, msg);
 
         String senderId = msg.getSenderId();
         int seqNumber = msg.getSequenceNumber();
         String idMsg = msg.getUniqueId();
-
         int ultimaSeq = ultimaSequencia.getOrDefault(senderId, 0);
 
         if (seqNumber == ultimaSeq + 1) {
             if (!mensagensEntregues.computeIfAbsent(senderId, k -> ConcurrentHashMap.newKeySet()).contains(idMsg)) {
                 filaMensagens.add(msg);
                 ultimaSequencia.put(senderId, seqNumber);
-                enviarACK(senderId, seqNumber);
+                enviarACK(senderId, ultimaSeq);
                 processarMensagensForaDeOrdem(senderId);
             }
         } else if (seqNumber > ultimaSeq + 1) {
@@ -206,7 +219,7 @@ public class No extends UnicastRemoteObject implements NoInterface {
     }
 
     private void processarMensagens() {
-        while (ativo) {
+        while (estado.getNomeEstado().contains("ATIVO")) {
             try {
                 Mensagem msg = filaMensagens.take(); // Ordena por timestamp
                 deliver(msg);
@@ -219,7 +232,7 @@ public class No extends UnicastRemoteObject implements NoInterface {
     }
 
     private void enviarHeartbeats() {
-        while (ativo) {
+        while (estado.getNomeEstado().contains("ATIVO")) {
             try {
                 Thread.sleep(2000);
                 for (NoInterface vizinho : new ArrayList<>(vizinhos)) { // Cópia para evitar concorrência
@@ -257,7 +270,7 @@ public class No extends UnicastRemoteObject implements NoInterface {
     }
 
     private void verificarACK(Mensagem msg, int tentativa) {
-        if (!ativo || tentativa >= MAX_RETRIES) {
+        if (!estado.getNomeEstado().contains("ATIVO") || tentativa >= MAX_RETRIES) {
             GerenciadorLog.getInstancia().registrar(idNo, 
                 "Falha crítica: não foi possível entregar mensagem após " + MAX_RETRIES + " tentativas");
             mensagensPendentes.remove(msg.getUniqueId());
@@ -296,19 +309,78 @@ public class No extends UnicastRemoteObject implements NoInterface {
 
     @Override
     public void heartbeat() throws RemoteException {
-        // Resposta ao heartbeat
+        estado.processarHeartbeat(this);
     }
 
     public void desligar() {
-        ativo = false;
+        estado.desligar(this);
+    }
+
+    // NOVO: Chamado pelo estado para finalizar recursos
+    public void finalizarRecursos() {
         executor.shutdownNow();
-        
         try {
             RegistryManager.getInstancia().removerNo(idNo);
         } catch (Exception e) {
             GerenciadorLog.getInstancia().registrar(idNo, 
                 "Erro ao desregistrar nó: " + e.getMessage());
         }
+    }
+    
+    // NOVO: Chamado pelo estado para inicializar recursos
+    public void inicializarRecursos() {
+        // Reinicia executor se necessário
+        if (executor.isShutdown()) {
+            executor = Executors.newScheduledThreadPool(3);
+            executor.submit(this::processarMensagens);
+            executor.submit(this::enviarHeartbeats);
+        }
+    }
+    
+    //  NOVO: Chamado pelo estado para iniciar recuperação
+    public void iniciarRecuperacao() {
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Iniciando processo de recuperação...");
+        // Lógica de recuperação (reconectar vizinhos, limpar filas, etc.)
+        mensagensPendentes.clear();
+    }
+    
+    // NOVO: Métodos para controle de estado
+    public void setEstado(EstadoNo novoEstado) {
+        if (estado.podeTransitarPara(novoEstado)) {
+            EstadoNo estadoAnterior = this.estado;
+            this.estado = novoEstado;
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Estado alterado: " + estadoAnterior.getNomeEstado() + 
+                " -> " + novoEstado.getNomeEstado());
+        } else {
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Transição inválida: " + estado.getNomeEstado() + 
+                " -> " + novoEstado.getNomeEstado());
+        }
+    }
+    
+    public EstadoNo getEstado() {
+        return estado;
+    }
+    
+    public String getIdNo() {
+        return idNo;
+    }
+    
+    // NOVO: Comandos de controle de estado
+    public void ativar() {
+        estado.ativar(this);
+    }
+    
+    public void recuperar() {
+        estado.recuperar(this);
+    }
+    
+    public void entrarEmFalha(String motivo) {
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Entrando em estado de falha: " + motivo);
+        setEstado(new EstadoEmFalha(motivo));
     }
 
     public void adicionarVizinho(NoInterface vizinho) throws RemoteException {
