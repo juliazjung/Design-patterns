@@ -6,11 +6,20 @@ public class Mensagem implements Serializable {
     private String conteudo;
     private long timestamp;
 
+    // Construtor original (mantido para compatibilidade)
     public Mensagem(String senderId, int sequenceNumber, String conteudo) {
         this.senderId = senderId;
         this.sequenceNumber = sequenceNumber;
         this.conteudo = conteudo;
         this.timestamp = System.currentTimeMillis();
+    }
+
+    // NOVO: Construtor com timestamp customizado
+    public Mensagem(String senderId, int sequenceNumber, String conteudo, long timestamp) {
+        this.senderId = senderId;
+        this.sequenceNumber = sequenceNumber;
+        this.conteudo = conteudo;
+        this.timestamp = timestamp;
     }
 
     public String getUniqueId() {

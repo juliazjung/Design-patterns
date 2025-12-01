@@ -51,20 +51,32 @@ public class No extends UnicastRemoteObject implements NoInterface {
     }
 
     public void broadcast(String conteudo) {
-        Mensagem msg = new Mensagem(idNo, contadorSequencia.incrementAndGet(), conteudo);
-        
-        GerenciadorLog.getInstancia().registrar(idNo, "Broadcasting mensagem: " + msg);
-       
-        mensagensPendentes.put(msg.getUniqueId(), msg);
-        executor.schedule(() -> verificarACK(msg, 0), ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        try {
+            // Usa a factory para criar mensagem
+            Mensagem msg = MensagemFactory.criarMensagem(
+                idNo, 
+                contadorSequencia.incrementAndGet(), 
+                conteudo
+            );
+            
+            GerenciadorLog.getInstancia().registrar(idNo, "Broadcasting mensagem: " + msg);
+            mensagensPendentes.put(msg.getUniqueId(), msg);
+            executor.schedule(() -> verificarACK(msg, 0), ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
 
-        for (NoInterface vizinho : vizinhos) {
-            try {
-                vizinho.receive(msg);
-            } catch (RemoteException e) {
-                GerenciadorLog.getInstancia().registrar(idNo, "Falha ao enviar para vizinho: " + e.getMessage());
-                tratarFalhaVizinho(vizinho);
+            for (NoInterface vizinho : vizinhos) {
+                try {
+                    vizinho.receive(msg);
+                } catch (RemoteException e) {
+                    GerenciadorLog.getInstancia().registrar(idNo, 
+                        "Falha ao enviar para vizinho: " + e.getMessage());
+                    tratarFalhaVizinho(vizinho);
+                }
             }
+        } catch (IllegalArgumentException e) {
+            // Trata erros de validação
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Erro ao criar mensagem: " + e.getMessage());
+            throw new RuntimeException("Não foi possível criar mensagem", e);
         }
     }
 
