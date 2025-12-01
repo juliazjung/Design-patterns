@@ -16,8 +16,11 @@ public class Principal {
             // Usa o Singleton do Registry
             RegistryManager registryManager = RegistryManager.getInstancia();
             
-            // Criar o nó
             No no = new No(idNo);
+
+            // Adiciona observador de métricas
+            MetricasObserver metricas = new MetricasObserver();
+            no.adicionarObservador(metricas);
             
             // Registra usando o singleton
             registryManager.registrarNo(idNo, no);
@@ -41,6 +44,9 @@ public class Principal {
                 String comando = scanner.nextLine();
 
                 if (comando.equalsIgnoreCase("exit") || comando.equalsIgnoreCase("shutdown")) {
+                    // Imprime métricas antes de sair
+                    metricas.imprimirRelatorio();
+
                     no.desligar();
                     // Usa singleton
                     registryManager.removerNo(idNo);
@@ -92,11 +98,17 @@ public class Principal {
                         }
                     }
                     
+                // NOVO COMANDO: mostrar métricas
+                else if (comando.equalsIgnoreCase("metricas")) {
+                    metricas.imprimirRelatorio();
+                }
+
                 } else {
                     System.out.println("Comando inválido");
                 }
             }
 
+            scanner.close();
             System.exit(0);
 
         } catch (Exception e) {
