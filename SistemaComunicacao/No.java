@@ -1,6 +1,4 @@
 import java.rmi.*;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.*;
 import java.util.concurrent.*;
@@ -20,8 +18,6 @@ public class No extends UnicastRemoteObject implements NoInterface {
     // Infraestrutura
     private ScheduledExecutorService executor;
     private boolean ativo;
-    private RegistradorLog log;
-    private Registry registry;
 
     // Para Atomic Broadcast (FIFO)
     private final Map<String, Integer> ultimaSequencia; // Controla a última sequência recebida de cada nó
@@ -45,30 +41,28 @@ public class No extends UnicastRemoteObject implements NoInterface {
                 Comparator.comparingLong(Mensagem::getTimestamp));
         this.executor = Executors.newScheduledThreadPool(3);
         this.ativo = true;
-        this.log = new RegistradorLog(idNo);
-        this.registry = LocateRegistry.getRegistry();
 
         this.estrategiaFalha = new SemFalha();
 
         executor.submit(this::processarMensagens);
         executor.submit(this::enviarHeartbeats);
 
-        System.out.println("Nó " + idNo + " iniciado. Aguardando conexões...");
+        GerenciadorLog.getInstancia().registrar(idNo, "Nó iniciado. Aguardando conexões...");
     }
 
     public void broadcast(String conteudo) {
         Mensagem msg = new Mensagem(idNo, contadorSequencia.incrementAndGet(), conteudo);
-        log.registrar("Broadcasting mensagem: " + msg);
+        
+        GerenciadorLog.getInstancia().registrar(idNo, "Broadcasting mensagem: " + msg);
+       
         mensagensPendentes.put(msg.getUniqueId(), msg);
-
-        // Agendar verificação de ACK
         executor.schedule(() -> verificarACK(msg, 0), ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
 
         for (NoInterface vizinho : vizinhos) {
             try {
                 vizinho.receive(msg);
             } catch (RemoteException e) {
-                log.registrar("Falha ao enviar para vizinho: " + e.getMessage());
+                GerenciadorLog.getInstancia().registrar(idNo, "Falha ao enviar para vizinho: " + e.getMessage());
                 tratarFalhaVizinho(vizinho);
             }
         }
@@ -81,18 +75,18 @@ public class No extends UnicastRemoteObject implements NoInterface {
 
         // Aplicação da estratégia
         try {
-            boolean deveProcessar = estrategiaFalha.processar(msg, log);
+            boolean deveProcessar = estrategiaFalha.processar(msg, new RegistradorLog(idNo));
             if (!deveProcessar) {
                 return; // Estratégia decidiu descartar a mensagem
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.registrar("Processamento interrompido durante aplicação de estratégia de falha");
+            GerenciadorLog.getInstancia().registrar(idNo, "Processamento interrompido durante aplicação de estratégia de falha");
             return;
         }
 
-        log.registrar("Recebida mensagem de " + msg.getSenderId() +
-                " [SEQ:" + msg.getSequenceNumber() + "]");
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Recebida mensagem de " + msg.getSenderId() + " [SEQ:" + msg.getSequenceNumber() + "]");
 
         String senderId = msg.getSenderId();
         int seqNumber = msg.getSequenceNumber();
@@ -101,10 +95,13 @@ public class No extends UnicastRemoteObject implements NoInterface {
         // Verificar ordem FIFO
         int ultimaSeq = ultimaSequencia.getOrDefault(senderId, 0);
 
-        log.registrar("Última sequência de " + senderId + ": " + ultimaSeq);
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Última sequência de " + senderId + ": " + ultimaSeq);
 
         if (seqNumber == ultimaSeq + 1) {
-            log.registrar("Mensagem na ordem correta, processando...");
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Mensagem na ordem correta, processando...");
+            
             if (!mensagensEntregues.computeIfAbsent(senderId, k -> ConcurrentHashMap.newKeySet()).contains(idMsg)) {
                 filaMensagens.add(msg);
                 ultimaSequencia.put(senderId, seqNumber);
@@ -114,22 +111,25 @@ public class No extends UnicastRemoteObject implements NoInterface {
                 processarMensagensForaDeOrdem(senderId);
             }
         } else if (seqNumber > ultimaSeq + 1) {
-            log.registrar("Mensagem fora de ordem (esperava " + (ultimaSeq + 1) +
-                    "), armazenando e enviando NACK");
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Mensagem fora de ordem (esperava " + (ultimaSeq + 1) + "), armazenando e enviando NACK");
+            
             mensagensForaDeOrdem.computeIfAbsent(senderId, k -> new ConcurrentSkipListMap<>())
                     .put(seqNumber, msg);
             enviarNACK(senderId, ultimaSeq);
         } else {
-            log.registrar("Mensagem duplicada ou antiga [SEQ:" + seqNumber + "], descartando");
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Mensagem duplicada ou antiga [SEQ:" + seqNumber + "], descartando");
         }
     }
 
     private void enviarNACK(String senderId, int lastReceivedSeq) {
         try {
-            NoInterface sender = (NoInterface) registry.lookup(senderId);
+            NoInterface sender = RegistryManager.getInstancia().buscarNo(senderId);
             sender.handleNACK(idNo, lastReceivedSeq);
         } catch (Exception e) {
-            log.registrar("Falha ao enviar NACK para " + senderId);
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Falha ao enviar NACK para " + senderId);
         }
     }
 
@@ -158,33 +158,39 @@ public class No extends UnicastRemoteObject implements NoInterface {
 
     private void enviarACK(String senderId, Mensagem msg) {
         try {
-            NoInterface sender = (NoInterface) registry.lookup(senderId);
+            // Usa o singleton do Registry
+            NoInterface sender = RegistryManager.getInstancia().buscarNo(senderId);
             sender.ack(msg);
         } catch (Exception e) {
-            log.registrar("Falha no ACK para " + senderId + ": " + e.getMessage());
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Falha no ACK para " + senderId + ": " + e.getMessage());
             try {
-                this.registry = LocateRegistry.getRegistry();
-                NoInterface sender = (NoInterface) registry.lookup(senderId);
+                // Reconexão simplificada
+                RegistryManager.getInstancia().reconectar();
+                NoInterface sender = RegistryManager.getInstancia().buscarNo(senderId);
                 sender.ack(msg);
             } catch (Exception ex) {
-                log.registrar("Falha ao reenviar ACK");
+                GerenciadorLog.getInstancia().registrar(idNo, "Falha ao reenviar ACK");
             }
         }
     }
 
     @Override
     public void handleNACK(String senderId, int lastReceivedSeq) throws RemoteException {
-        log.registrar("Recebido NACK de " + senderId + ", última seq recebida: " + lastReceivedSeq);
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Recebido NACK de " + senderId + ", última seq recebida: " + lastReceivedSeq);
 
         // Enviar todas as mensagens pendentes a partir da sequência esperada
         for (Mensagem msg : mensagensPendentes.values()) {
             if (msg.getSenderId().equals(idNo) && msg.getSequenceNumber() > lastReceivedSeq) {
                 try {
                     NoInterface destinatario = obterNo(senderId);
-                    log.registrar("Reenviando mensagem [" + msg.getSequenceNumber() + "] para " + senderId);
+                    GerenciadorLog.getInstancia().registrar(idNo, 
+                        "Reenviando mensagem [" + msg.getSequenceNumber() + "] para " + senderId);
                     destinatario.receive(msg);
                 } catch (Exception e) {
-                    log.registrar("Falha crítica ao reenviar mensagem para " + senderId);
+                    GerenciadorLog.getInstancia().registrar(idNo, 
+                        "Falha crítica ao reenviar mensagem para " + senderId);
                 }
             }
         }
@@ -197,7 +203,8 @@ public class No extends UnicastRemoteObject implements NoInterface {
         mensagensEntregues.computeIfAbsent(sender, k -> ConcurrentHashMap.newKeySet())
                 .add(idMsg);
 
-        log.registrar("Delivering mensagem [" + idMsg + "]: " + msg.getConteudo());
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Delivering mensagem [" + idMsg + "]: " + msg.getConteudo());
     }
 
     private void processarMensagens() {
@@ -207,7 +214,8 @@ public class No extends UnicastRemoteObject implements NoInterface {
                 deliver(msg);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.registrar("Processador de mensagens interrompido");
+                GerenciadorLog.getInstancia().registrar(idNo, 
+                    "Processador de mensagens interrompido");
             }
         }
     }
@@ -227,7 +235,8 @@ public class No extends UnicastRemoteObject implements NoInterface {
                             ACK_TIMEOUT_MS = rtt * 2; // Timeout = 2x RTT
                         }
                     } catch (RemoteException e) {
-                        log.registrar("Falha no heartbeat para " + vizinho);
+                        GerenciadorLog.getInstancia().registrar(idNo, 
+                            "Falha no heartbeat para " + vizinho);
                         tratarFalhaVizinho(vizinho);
                     }
                 }
@@ -238,26 +247,29 @@ public class No extends UnicastRemoteObject implements NoInterface {
     }
 
     private void tratarFalhaVizinho(NoInterface vizinhoFalho) {
-        log.registrar("Tratando falha do vizinho");
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Tratando falha do vizinho");
         vizinhos.remove(vizinhoFalho);
     }
 
     @Override
     public void ack(Mensagem msg) throws RemoteException {
-        log.registrar("Enviando ACK para " + msg.getSenderId() +
-                " [SEQ:" + msg.getSequenceNumber() + "]");
+        GerenciadorLog.getInstancia().registrar(idNo, 
+            "Enviando ACK para " + msg.getSenderId() + " [SEQ:" + msg.getSequenceNumber() + "]");
         mensagensPendentes.remove(msg.getUniqueId());
     }
 
     private void verificarACK(Mensagem msg, int tentativa) {
         if (!ativo || tentativa >= MAX_RETRIES) {
-            log.registrar("Falha crítica: não foi possível entregar mensagem após " + MAX_RETRIES + " tentativas");
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Falha crítica: não foi possível entregar mensagem após " + MAX_RETRIES + " tentativas");
             mensagensPendentes.remove(msg.getUniqueId()); // Limpeza final
             return;
         }
 
         if (mensagensPendentes.containsKey(msg.getUniqueId())) {
-            log.registrar("Reenviando mensagem [Tentativa " + (tentativa + 1) + "]: " + msg.getUniqueId());
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Reenviando mensagem [Tentativa " + (tentativa + 1) + "]: " + msg.getUniqueId());
 
             // Reenviar apenas para vizinhos que não confirmaram
             for (NoInterface vizinho : vizinhos) {
@@ -267,7 +279,7 @@ public class No extends UnicastRemoteObject implements NoInterface {
                         vizinho.receive(msg);
                     }
                 } catch (RemoteException e) {
-                    log.registrar("Falha no reenvio para " + vizinho);
+                    GerenciadorLog.getInstancia().registrar(idNo, "Falha no reenvio para " + vizinho);
                 }
             }
 
@@ -284,6 +296,13 @@ public class No extends UnicastRemoteObject implements NoInterface {
     public void desligar() {
         ativo = false;
         executor.shutdownNow();
+        
+        try {
+            RegistryManager.getInstancia().removerNo(idNo);
+        } catch (Exception e) {
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Erro ao desregistrar nó: " + e.getMessage());
+        }
     }
 
     public void adicionarVizinho(NoInterface vizinho) throws RemoteException {
@@ -293,24 +312,28 @@ public class No extends UnicastRemoteObject implements NoInterface {
             try {
                 vizinho.adicionarVizinho(this);
             } catch (RemoteException e) {
-                log.registrar("Falha ao estabelecer conexão recíproca");
+                GerenciadorLog.getInstancia().registrar(idNo, "Falha ao estabelecer conexão recíproca");
             }
         }
     }
 
     private NoInterface obterNo(String idNo) throws RemoteException {
         try {
-            return (NoInterface) registry.lookup(idNo);
+            // Usa singleton
+            return RegistryManager.getInstancia().buscarNo(idNo);
         } catch (NotBoundException e) {
-            log.registrar("Nó " + idNo + " não encontrado no registry");
+            GerenciadorLog.getInstancia().registrar(this.idNo, 
+                "Nó " + idNo + " não encontrado no registry");
             throw new RemoteException("Nó não encontrado", e);
         } catch (RemoteException e) {
-            log.registrar("Falha no registry, tentando recriar...");
+            GerenciadorLog.getInstancia().registrar(this.idNo, 
+                "Falha no registry, tentando reconectar...");
             try {
-                this.registry = LocateRegistry.getRegistry();
-                return (NoInterface) registry.lookup(idNo);
+                RegistryManager.getInstancia().reconectar();
+                return RegistryManager.getInstancia().buscarNo(idNo);
             } catch (Exception ex) {
-                log.registrar("Falha crítica no registry");
+                GerenciadorLog.getInstancia().registrar(this.idNo, 
+                    "Falha crítica no registry");
                 throw new RemoteException("Registry inacessível", ex);
             }
         }
@@ -320,26 +343,27 @@ public class No extends UnicastRemoteObject implements NoInterface {
     public void setSimularFalhaOmissao(boolean ativar) throws RemoteException {
         if (ativar) {
             this.estrategiaFalha = new FalhaOmissao();
-            log.registrar("Modo falha por omissão: ATIVADO");
+            GerenciadorLog.getInstancia().registrar(this.idNo, "Modo falha por omissão: ATIVADO");
         } else {
             this.estrategiaFalha = new SemFalha();
-            log.registrar("Modo falha por omissão: desativado");
+            GerenciadorLog.getInstancia().registrar(this.idNo, "Modo falha por omissão: desativado");
         }
     }
 
     public void setSimularFalhaTemporizacao(boolean ativar) throws RemoteException {
         if (ativar) {
             this.estrategiaFalha = new FalhaTemporizacao();
-            log.registrar("Modo falha por temporização: ATIVADO");
+            GerenciadorLog.getInstancia().registrar(this.idNo, "Modo falha por temporização: ATIVADO");
         } else {
             this.estrategiaFalha = new SemFalha();
-            log.registrar("Modo falha por temporização: desativado");
+            GerenciadorLog.getInstancia().registrar(this.idNo, "Modo falha por temporização: desativado");
         }
     }
 
     // NOVO: Método para configurar estratégia customizada
     public void setEstrategiaFalha(EstrategiaFalha estrategia) throws RemoteException {
         this.estrategiaFalha = estrategia;
-        log.registrar("Estratégia de falha alterada para: " + estrategia.getNome());
+        GerenciadorLog.getInstancia().registrar(this.idNo, 
+            "Estratégia de falha alterada para: " + estrategia.getNome());
     }
 }
