@@ -75,7 +75,7 @@ public class EstadoEmFalha implements EstadoNo {
     
     @Override
     public boolean podeTransitarPara(EstadoNo novoEstado) {
-        // ✅ Pode transitar para Recuperando ou Inativo
+        // Pode transitar para Recuperando ou Inativo
         return novoEstado instanceof EstadoRecuperando || 
                novoEstado instanceof EstadoInativo;
     }

@@ -444,4 +444,18 @@ public class No extends UnicastRemoteObject implements NoInterface {
         GerenciadorLog.getInstancia().registrar(this.idNo, 
             "Estratégia de falha alterada para: " + estrategia.getNome());
     }
+
+    // NOVO: Remove vizinho (para undo de connect)
+    public void removerVizinho(NoInterface vizinho) throws RemoteException {
+        if (vizinhos.contains(vizinho)) {
+            vizinhos.remove(vizinho);
+            GerenciadorLog.getInstancia().registrar(idNo, 
+                "Vizinho removido");
+        }
+    }
+    
+    // NOVO: Retorna estratégia atual (para undo)
+    public EstrategiaFalha getEstrategiaFalha() {
+        return estrategiaFalha;
+    }
 }

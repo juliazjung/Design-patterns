@@ -1,135 +1,82 @@
-import java.rmi.RemoteException;
-import java.util.Arrays;
 import java.util.Scanner;
 
 public class Principal {
     public static void main(String[] args) {
         if (args.length != 1) {
             System.err.println("Uso: java Principal <ID_No>");
-            System.err.println("Exemplo: java Principal No1");
             System.exit(1);
         }
 
         String idNo = args[0];
 
         try {
-            // Usa o Singleton do Registry
             RegistryManager registryManager = RegistryManager.getInstancia();
-            
             No no = new No(idNo);
-
-            // Adiciona observador de métricas
+            
             MetricasObserver metricas = new MetricasObserver();
             no.adicionarObservador(metricas);
             
-            // Registra usando o singleton
             registryManager.registrarNo(idNo, no);
             
-            // Lista nós usando o singleton
-            GerenciadorLog.getInstancia().registrarGlobal(
-                "Nós registrados: " + Arrays.toString(registryManager.listarNos()));
-
-            // Interface de controle
+            // Cria gerenciador de comandos
+            GerenciadorComandos gerenciadorComandos = new GerenciadorComandos();
+            
             Scanner scanner = new Scanner(System.in);
             System.out.println("\nComandos disponíveis para " + idNo + ":");
             System.out.println("  connect <no> - Conectar a outro nó");
             System.out.println("  broadcast <mensagem> - Enviar mensagem");
-            System.out.println("  falha omissao <on/off> - Ativar/desativar falha por omissão");
-            System.out.println("  falha tempo <on/off> - Ativar/desativar falha por temporização");
-            System.out.println("  shutdown - Desligar este nó");
-            System.out.println("  exit - Sair do programa");
+            System.out.println("  falha <tipo> <on/off> - Ativar/desativar falha");
+            System.out.println("  estado - Ver estado atual");
+            System.out.println("  metricas - Mostrar métricas");
+            System.out.println("  undo - Desfazer último comando");
+            System.out.println("  redo - Refazer comando desfeito");
+            System.out.println("  historico - Ver histórico de comandos");
+            System.out.println("  shutdown/exit - Desligar nó");
 
             while (true) {
                 System.out.print(idNo + "> ");
-                String comando = scanner.nextLine();
-
-                if (comando.equalsIgnoreCase("exit") || comando.equalsIgnoreCase("shutdown")) {
-                    // Imprime métricas antes de sair
-                    metricas.imprimirRelatorio();
-
-                    no.desligar();
-                    // Usa singleton
-                    registryManager.removerNo(idNo);
-                    GerenciadorLog.getInstancia().registrar(idNo, "Nó desligado");
-                    GerenciadorLog.getInstancia().fecharLogs();
-                    break;
-
-                } else if (comando.startsWith("connect ")) {
-                    String outroNoId = comando.substring(8).trim();
-                    try {
-                        System.out.println("Procurando " + outroNoId + " no registry...");
-                        
-                        // Usa singleton
-                        NoInterface outroNo = registryManager.buscarNo(outroNoId);
-                        
-                        System.out.println("Encontrado, estabelecendo conexão...");
-                        no.adicionarVizinho(outroNo);
-                        System.out.println("Conexão bilateral estabelecida com " + outroNoId);
-                    } catch (Exception e) {
-                        System.err.println("ERRO: " + e.getMessage());
-                    }
-
-                } else if (comando.startsWith("broadcast ")) {
-                    String mensagem = comando.substring(10).trim();
-                    no.broadcast(mensagem);
-                    System.out.println("Mensagem enviada para todos os vizinhos");
+                String entrada = scanner.nextLine();
                 
-                } else if (comando.startsWith("falha omissao ")) {
-                    String[] parts = comando.split(" ");
-                    if (parts.length == 3) {
-                        try {
-                            boolean ativar = parts[2].equalsIgnoreCase("on");
-                            no.setSimularFalhaOmissao(ativar);
-                            System.out.println("Falha por omissão " + (ativar ? "ativada" : "desativada"));
-                        } catch (RemoteException e) {
-                            System.err.println("Erro: " + e.getMessage());
+                // Comandos especiais do gerenciador
+                if (entrada.equalsIgnoreCase("undo")) {
+                    gerenciadorComandos.desfazerUltimo();
+                    continue;
+                }
+                
+                if (entrada.equalsIgnoreCase("redo")) {
+                    gerenciadorComandos.refazerUltimo();
+                    continue;
+                }
+                
+                if (entrada.equalsIgnoreCase("historico")) {
+                    gerenciadorComandos.mostrarHistorico();
+                    continue;
+                }
+                
+                // Cria e executa comando via factory
+                try {
+                    Comando comando = ComandoFactory.criarComando(entrada, no, metricas);
+                    boolean sucesso = gerenciadorComandos.executarComando(comando);
+                    
+                    if (sucesso) {
+                        System.out.println(comando.getResultado());
+                        
+                        // Se for comando de shutdown, sai do loop
+                        if (comando instanceof ComandoDesligar) {
+                            break;
                         }
-                    }
-
-                } else if (comando.startsWith("falha tempo ")) {
-                    String[] parts = comando.split(" ");
-                    if (parts.length == 3) {
-                        try {
-                            boolean ativar = parts[2].equalsIgnoreCase("on");
-                            no.setSimularFalhaTemporizacao(ativar);
-                            System.out.println("Falha por temporização " + (ativar ? "ativada" : "desativada"));
-                        } catch (RemoteException e) {
-                            System.err.println("Erro: " + e.getMessage());
-                        }
+                    } else {
+                        System.err.println("Falha ao executar: " + comando.getResultado());
                     }
                     
-                // NOVO COMANDO: mostrar métricas
-                else if (comando.equalsIgnoreCase("metricas")) {
-                    metricas.imprimirRelatorio();
-                }
-
-                // NOVO: Comando para ver estado atual
-                else if (comando.equalsIgnoreCase("estado")) {
-                    System.out.println("Estado atual: " + no.getEstado().getNomeEstado());
-                }
-                
-                // NOVO: Comando para ativar nó
-                else if (comando.equalsIgnoreCase("ativar")) {
-                    no.ativar();
-                }
-                
-                // NOVO: Comando para recuperar de falha
-                else if (comando.equalsIgnoreCase("recuperar")) {
-                    no.recuperar();
-                }
-                
-                // NOVO: Comando para simular falha
-                else if (comando.startsWith("falhar ")) {
-                    String motivo = comando.substring(7).trim();
-                    no.entrarEmFalha(motivo);
-                    System.out.println("Nó entrou em estado de falha: " + motivo);
-                }
-
-                } else {
-                    System.out.println("Comando inválido");
+                } catch (IllegalArgumentException e) {
+                    System.err.println("ERRO: " + e.getMessage());
+                } catch (Exception e) {
+                    System.err.println("ERRO inesperado: " + e.getMessage());
+                    e.printStackTrace();
                 }
             }
-
+            
             scanner.close();
             System.exit(0);
 
